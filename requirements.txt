@@ -1,0 +1,14 @@
+# requirements.txt
+fastapi
+uvicorn[standard]
+python-multipart
+openai
+reportlab
+openpyxl
+pypdf
+python-docx
+pandas
+Pillow
+
+# Procfile (ou start command no Railway)
+uvicorn main:app --host 0.0.0.0 --port $PORT
