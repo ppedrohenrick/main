@@ -2,11 +2,10 @@
 =======================================================
   GERADOR DE APR — API FastAPI (Railway)
   Endpoints: POST /processar  |  GET /stream/{job_id}
-             GET /download/{job_id}/{tipo}
 =======================================================
   pip install fastapi uvicorn python-multipart openai
               reportlab openpyxl pypdf python-docx
-              pandas Pillow aiofiles
+              pandas Pillow aiofiles supabase
 =======================================================
 """
 
@@ -21,15 +20,19 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
+from io import BytesIO
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse, Response
+from fastapi.responses import StreamingResponse, Response
 
 # ─────────────────────────────────────────────────────
 #  CONFIG
 # ─────────────────────────────────────────────────────
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_KEY       = os.environ.get("DEEPSEEK_API_KEY", "")
+SUPABASE_URL           = os.environ.get("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY   = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_BUCKET        = "aprs"
 
 TEMP_DIR = Path(tempfile.gettempdir()) / "apr_jobs"
 TEMP_DIR.mkdir(exist_ok=True)
@@ -39,7 +42,7 @@ jobs: Dict[str, Dict[str, Any]] = {}
 # ─────────────────────────────────────────────────────
 #  APP
 # ─────────────────────────────────────────────────────
-app = FastAPI(title="APR Generator API", version="1.0.0")
+app = FastAPI(title="APR Generator API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,6 +52,24 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition", "Content-Type"],
 )
+
+
+# ══════════════════════════════════════════════════════
+#  SUPABASE UPLOAD
+# ══════════════════════════════════════════════════════
+
+def upload_supabase(conteudo_bytes: bytes, nome_arquivo: str, content_type: str) -> str:
+    """Faz upload pro Supabase Storage e retorna a URL pública."""
+    from supabase import create_client
+    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    path = f"{nome_arquivo}"
+    sb.storage.from_(SUPABASE_BUCKET).upload(
+        path=path,
+        file=conteudo_bytes,
+        file_options={"content-type": content_type, "upsert": "true"},
+    )
+    res = sb.storage.from_(SUPABASE_BUCKET).get_public_url(path)
+    return res
 
 
 # ══════════════════════════════════════════════════════
@@ -383,10 +404,10 @@ def _clean_lines(raw):
 
 
 # ══════════════════════════════════════════════════════
-#  EXPORTAÇÃO EXCEL — MODELO GAROA
+#  EXPORTAÇÃO EXCEL — MODELO GAROA (retorna BytesIO)
 # ══════════════════════════════════════════════════════
 
-def exportar_excel_garoa(dados, etapas, caminho):
+def exportar_excel_garoa(dados, etapas) -> bytes:
     wb = _Workbook()
     ws = wb.active
     ws.title = "APR"
@@ -573,14 +594,16 @@ def exportar_excel_garoa(dados, etapas, caminho):
             _apply(ws, row, c, "")
         ws.row_dimensions[row].height = 30; row += 1
 
-    wb.save(caminho)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 # ══════════════════════════════════════════════════════
-#  EXPORTAÇÃO EXCEL — MODELO FR-EHS-04-01
+#  EXPORTAÇÃO EXCEL — MODELO FR-EHS-04-01 (retorna bytes)
 # ══════════════════════════════════════════════════════
 
-def exportar_excel_frehs(dados, etapas, caminho):
+def exportar_excel_frehs(dados, etapas) -> bytes:
     wb = _Workbook()
     ws = wb.active
     ws.title = "APR"
@@ -668,14 +691,16 @@ def exportar_excel_frehs(dados, etapas, caminho):
             ws.cell(row=row, column=col).font   = _font(size=9)
         ws.row_dimensions[row].height = 70; row += 1
 
-    wb.save(caminho)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 # ══════════════════════════════════════════════════════
-#  EXPORTAÇÃO PDF — MODELO GAROA
+#  EXPORTAÇÃO PDF — MODELO GAROA (retorna bytes)
 # ══════════════════════════════════════════════════════
 
-def exportar_pdf_garoa(dados, etapas, caminho):
+def exportar_pdf_garoa(dados, etapas) -> bytes:
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib import colors
     from reportlab.lib.units import cm
@@ -684,7 +709,8 @@ def exportar_pdf_garoa(dados, etapas, caminho):
     from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
     PAGE = landscape(A4)
-    doc  = SimpleDocTemplate(caminho, pagesize=PAGE,
+    buf  = BytesIO()
+    doc  = SimpleDocTemplate(buf, pagesize=PAGE,
                              rightMargin=1*cm, leftMargin=1*cm,
                              topMargin=1*cm, bottomMargin=1*cm)
     W = PAGE[0] - 2*cm
@@ -929,7 +955,6 @@ def exportar_pdf_garoa(dados, etapas, caminho):
     elems.append(apr_table)
     elems.append(Spacer(1, 0.3*cm))
 
-    # ── Orientações de emergência ──
     t_emerg = Table([[Paragraph(
         "ORIENTAÇÕES EM CASO DE EMERGÊNCIA OU INCIDENTES: PROCURAR EQUIPE DE TÉCNICOS DE "
         "SEGURANÇA PARA ENCAMINHAMENTO. NA IMPOSSIBILIDADE, PEDIR AJUDA PARA A PESSOA MAIS PRÓXIMA.",
@@ -942,7 +967,6 @@ def exportar_pdf_garoa(dados, etapas, caminho):
     elems.append(t_emerg)
     elems.append(Spacer(1, 0.2*cm))
 
-    # ── Encerramento da APR ──
     enc_title = Table(
         [[Paragraph("ENCERRAMENTO DA APR", ps("et", 8, bold=True, align=TA_CENTER))]],
         colWidths=[W])
@@ -975,13 +999,14 @@ def exportar_pdf_garoa(dados, etapas, caminho):
     elems.append(enc_body)
 
     doc.build(elems)
+    return buf.getvalue()
 
 
 # ══════════════════════════════════════════════════════
-#  EXPORTAÇÃO PDF — MODELO FR-EHS-04-01
+#  EXPORTAÇÃO PDF — MODELO FR-EHS-04-01 (retorna bytes)
 # ══════════════════════════════════════════════════════
 
-def exportar_pdf_frehs(dados, etapas, caminho):
+def exportar_pdf_frehs(dados, etapas) -> bytes:
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib import colors
     from reportlab.lib.units import cm
@@ -990,7 +1015,8 @@ def exportar_pdf_frehs(dados, etapas, caminho):
     from reportlab.lib.enums import TA_CENTER, TA_LEFT
 
     PAGE = landscape(A4)
-    doc  = SimpleDocTemplate(caminho, pagesize=PAGE,
+    buf  = BytesIO()
+    doc  = SimpleDocTemplate(buf, pagesize=PAGE,
                              rightMargin=1*cm, leftMargin=1*cm,
                              topMargin=1*cm, bottomMargin=1*cm)
     W = PAGE[0] - 2*cm
@@ -1085,6 +1111,7 @@ def exportar_pdf_frehs(dados, etapas, caminho):
         ("TOPPADDING",(0,0),(-1,-1),4),("BOTTOMPADDING",(0,0),(-1,-1),4),("LEFTPADDING",(0,0),(-1,-1),4)]))
     elems.append(t)
     doc.build(elems)
+    return buf.getvalue()
 
 
 # ══════════════════════════════════════════════════════
@@ -1116,31 +1143,35 @@ def pipeline(job_id: str, arquivo_path: str, modelo: str):
         })
 
         evento("step", {"step": 2, "status": "active"})
-
         if modelo == "garoa":
             etapas = gerar_apr_garoa(dados, conteudo["texto"])
         else:
             etapas = gerar_apr_frehs(dados, conteudo["texto"])
-
         evento("step", {"step": 2, "status": "done"})
+
         evento("step", {"step": 3, "status": "active"})
         evento("step", {"step": 3, "status": "done"})
+
         evento("step", {"step": 4, "status": "active"})
 
-        pdf_path = TEMP_DIR / f"{job_id}.pdf"
-        xls_path = TEMP_DIR / f"{job_id}.xlsx"
-
+        # ── Gera os arquivos em memória ──
         if modelo == "garoa":
-            exportar_pdf_garoa(dados, etapas, str(pdf_path))
-            exportar_excel_garoa(dados, etapas, str(xls_path))
+            pdf_bytes  = exportar_pdf_garoa(dados, etapas)
+            xlsx_bytes = exportar_excel_garoa(dados, etapas)
         else:
-            exportar_pdf_frehs(dados, etapas, str(pdf_path))
-            exportar_excel_frehs(dados, etapas, str(xls_path))
+            pdf_bytes  = exportar_pdf_frehs(dados, etapas)
+            xlsx_bytes = exportar_excel_frehs(dados, etapas)
+
+        # ── Faz upload pro Supabase Storage ──
+        nome_base = f"{job_id}"
+        pdf_url   = upload_supabase(pdf_bytes,  f"{nome_base}.pdf",  "application/pdf")
+        xlsx_url  = upload_supabase(xlsx_bytes, f"{nome_base}.xlsx",
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         evento("step", {"step": 4, "status": "done"})
         evento("pronto", {
-            "pdf_url":  f"/download/{job_id}/pdf",
-            "xlsx_url": f"/download/{job_id}/xlsx",
+            "pdf_url":  pdf_url,
+            "xlsx_url": xlsx_url,
             "etapas":   len(etapas),
         })
         job["status"] = "done"
@@ -1162,7 +1193,7 @@ def pipeline(job_id: str, arquivo_path: str, modelo: str):
 
 @app.get("/")
 async def health():
-    return {"status": "ok", "service": "APR Generator API"}
+    return {"status": "ok", "service": "APR Generator API v2"}
 
 
 @app.post("/processar")
@@ -1222,55 +1253,6 @@ async def stream(job_id: str):
             "Cache-Control":               "no-cache",
             "X-Accel-Buffering":           "no",
             "Access-Control-Allow-Origin": "*",
-        },
-    )
-
-
-# ══════════════════════════════════════════════════════
-#  DOWNLOAD — GET + HEAD com headers corretos
-# ══════════════════════════════════════════════════════
-
-@app.api_route("/download/{job_id}/{tipo}", methods=["GET", "HEAD"])
-async def download(job_id: str, tipo: str, request: Request):
-    if tipo == "pdf":
-        path  = TEMP_DIR / f"{job_id}.pdf"
-        media = "application/pdf"
-        nome  = "APR.pdf"
-    elif tipo == "xlsx":
-        path  = TEMP_DIR / f"{job_id}.xlsx"
-        media = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        nome  = "APR.xlsx"
-    else:
-        raise HTTPException(status_code=400, detail="Tipo inválido. Use 'pdf' ou 'xlsx'.")
-
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Arquivo não encontrado ou ainda sendo gerado.")
-
-    headers = {
-        "Content-Disposition": f'attachment; filename="{nome}"',
-        "Access-Control-Allow-Origin":  "*",
-        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-        "Access-Control-Allow-Headers": "*",
-        "Cache-Control":                "no-cache, no-store, must-revalidate",
-        "X-Frame-Options":              "ALLOWALL",
-        "Content-Security-Policy":      "frame-ancestors *",
-    }
-
-    if request.method == "HEAD":
-        return Response(status_code=200, media_type=media, headers=headers)
-
-    content = path.read_bytes()
-    return Response(content=content, media_type=media, headers=headers)
-
-
-@app.options("/download/{job_id}/{tipo}")
-async def download_options(job_id: str, tipo: str):
-    return Response(
-        status_code=200,
-        headers={
-            "Access-Control-Allow-Origin":  "*",
-            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
         },
     )
 
